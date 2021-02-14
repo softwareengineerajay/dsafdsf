@@ -1,0 +1,132 @@
+trigger:
+- master
+- develop
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:    
+  buildConfiguration: 'Release'  
+  org: 'ApiHub'
+  feedProj: 'ARM Generation Tool'
+  feed: 'ArmGenFeed'
+  feedPkgName: 'arm-gen-utils'  
+  feedPkgId: 'a6e384ab-d385-4541-abbc-3cd2ecb0a5cf'   
+
+  schemaFeedProj: 'Landmark Global Schema Deployment'
+  schemaFeed: 'LgsDefinitionFeed'
+  schemaFeedPkgName: 'lgs-schemas'  
+  schemaFeedPkgId: '13713545-6a2b-4421-b8cf-bb77a5375ecb'
+  
+  isMaster: $[eq(variables['Build.SourceBranchName'], 'master')]
+
+steps:
+- task: PowerShell@2  
+  displayName: Get Latest Version of Tool 
+  inputs:
+    targetType: 'inline'
+    script: |       
+       $branchFeed = '$(feed)@Prerelease'
+       if ( '$(isMaster)' -eq 'True' )
+       {
+          $branchFeed = '$(feed)@Release'
+       }
+       Write-Host Feed for branch is: $branchFeed       
+       $head = @{ Authorization = "Bearer $(system.accesstoken)" }
+       $verUrl = "https://feeds.dev.azure.com/{org}/{proj}/_apis/packaging/Feeds/{feed}/packages/{pId}?api-version=5.0-preview.1"
+       $url = $verUrl -replace '{org}', '$(org)' -replace '{proj}', '$(feedProj)'  -replace '{feed}', $branchFeed -replace '{pid}', '$(feedPkgId)' 
+       Write-Host $url
+       $package = Invoke-RestMethod -Uri $url -Method Get -Headers $head -ContentType application/json
+       $latestVersion = ($package.versions[0]).version
+       Write-Host "The latest version is $latestVersion"
+       Write-Host "##vso[task.setvariable variable=latestVersion]$latestVersion"
+       if (![string]::IsNullOrEmpty($latestVersion)){       
+          exit 0
+       }       
+
+- task: UniversalPackages@0
+  displayName: Download Tool
+  inputs:
+    command: download
+    downloadDirectory: 'HubTool'
+    vstsFeed: 'ARM Generation Tool/ArmGenFeed'
+    vstsFeedPackage: 'arm-gen-utils'
+    vstsPackageVersion: $(latestVersion) 
+    
+- task: PowerShell@2  
+  displayName: Store Tool Version
+  inputs:
+    targetType: 'inline'
+    script: |
+       $latestVer = (get-item env:latestVersion).Value          
+       $path = '$(System.DefaultWorkingDirectory)/HubTool/version.json'       
+       $verJson = Get-Content $path -raw | ConvertFrom-Json       
+       $verJson.version = "$latestVer"
+       $verJson | ConvertTo-Json | set-content $path
+       $versionTxt = Get-Content $path -raw
+    
+- task: PowerShell@2  
+  displayName: Get Latest Version of Schema 
+  inputs:
+    targetType: 'inline'
+    script: |       
+       $branchFeed = '$(schemaFeed)@Prerelease'
+       if ( '$(isMaster)' -eq 'True' )
+       {
+          $branchFeed = '$(schemaFeed)@Release'
+       } 
+       Write-Host Feed for branch is: $branchFeed       
+       $head = @{ Authorization = "Bearer $(system.accesstoken)" }
+       $verUrl = "https://feeds.dev.azure.com/{org}/{proj}/_apis/packaging/Feeds/{feed}/packages/{pId}?api-version=5.0-preview.1"
+       $url = $verUrl -replace '{org}', '$(org)' -replace '{proj}', '$(schemaFeedProj)'  -replace '{feed}', $branchFeed -replace '{pid}', '$(schemaFeedPkgId)' 
+       Write-Host $url
+       $package = Invoke-RestMethod -Uri $url -Method Get -Headers $head -ContentType application/json       
+       $latestSchemaVersion = ($package.versions[0]).version
+       Write-Host "The latest version is $latestSchemaVersion"
+       Write-Host "##vso[task.setvariable variable=latestSchemaVersion]$latestSchemaVersion"
+       if (![string]::IsNullOrEmpty($latestSchemaVersion)){       
+          exit 0
+       }
+    
+- task: UniversalPackages@0
+  displayName: Download LGS Schemas
+  inputs:
+    command: download
+    downloadDirectory: 'LgsSchema'
+    vstsFeed: 'Landmark Global Schema Deployment/LgsDefinitionFeed'
+    vstsFeedPackage: 'lgs-schemas'
+    vstsPackageVersion: $(latestSchemaVersion)
+    
+- task: CmdLine@2
+  displayName: List Files
+  inputs:
+    script: 'dir /s /b' 
+    workingDirectory: '$(System.DefaultWorkingDirectory)'
+    failOnStderr: true
+
+- task: FileTransform@2
+  inputs:
+    folderPath: '$(System.DefaultWorkingDirectory)/HubTool'    
+    jsonTargetFiles: 'appsettings.json'
+    xmlTransformationRules: ''
+
+- task: CmdLine@2
+  displayName: Generate ARM (plus other output)
+  inputs:
+    script: 'dotnet ApiHubTool.dll -w $(System.DefaultWorkingDirectory) -g External -r Validation -l On -d ChangedApi'    
+    workingDirectory: '.\HubTool\'
+
+- task: PublishBuildArtifacts@1
+  displayName: Publish Tool Version
+  inputs:    
+    PathtoPublish: '.\HubTool\version.json'
+    ArtifactName: 'toolVersion'
+    publishLocation: 'Container'
+
+- task: PublishBuildArtifacts@1
+  displayName: Publish All Definitions
+  inputs:    
+    PathtoPublish: '.\APIS'
+    ArtifactName: 'apidefinitions'
+    publishLocation: 'Container'      
+
